@@ -7,6 +7,7 @@ import { ShadowService } from "./shadow.service";
 import { SorobanController } from "./soroban.controller";
 import { SorobanService } from "./soroban.service";
 import { SolverRegistryService } from "./solver-registry.service";
+import { SolverBondService } from "./solver-bond.service";
 import { SignerService } from "./signer.service";
 import { StellarTxService } from "./stellar-tx.service";
 import { TxConfirmationService } from "./tx-confirmation.service";
@@ -60,6 +61,7 @@ import { IntentsModule } from "../intents/intents.module";
     StellarTxService,
 
     SolverRegistryService,
+    SolverBondService,
     EventIngestionService,
 
     // ── Solver-registry event ingestion (issue #399) ──────────────────────
@@ -71,6 +73,7 @@ import { IntentsModule } from "../intents/intents.module";
   exports: [
     SorobanService,
     SolverRegistryService,
+    SolverBondService,
     SignerService,
     StellarTxService,
     TxConfirmationService,

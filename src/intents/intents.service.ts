@@ -520,6 +520,32 @@ export class IntentsService {
     return updated;
   }
 
+  /** Accept only when this solver remains below the configured exposure cap. */
+  async acceptIfOpenWithinExposure(
+    id: string,
+    solver: string,
+    candidateExposureUsdMicros: bigint,
+    maxExposureUsdMicros: bigint,
+    now = Math.floor(Date.now() / 1000),
+  ): Promise<{ intent: Intent | null; exposureExceeded: boolean }> {
+    const intent = await this.repo.findById(id);
+    if (!intent) return { intent: null, exposureExceeded: false };
+    const fillWindow = this.protocolParamsService.snapshotForChain(intent.srcChain).fillWindowSeconds;
+    const result = await this.repo.acceptIfOpenWithinExposure(
+      id,
+      solver,
+      now + fillWindow,
+      now,
+      candidateExposureUsdMicros,
+      maxExposureUsdMicros,
+    );
+    if (result.intent !== null) this.countTransition("open", "accepted");
+    if (this.beginShadowObservation()) {
+      this.observeAccept(result.intent ?? intent, solver, result.intent !== null);
+    }
+    return result;
+  }
+
   /** Shadow hook for `accept` — reported whether or not the conditional write won. */
   private observeAccept(intent: Intent, solver: string, committed: boolean): void {
     this.reportShadow(
@@ -533,9 +559,6 @@ export class IntentsService {
         nativeToScVal(intent.deadline, { type: "u64" }),
       ]),
     );
-    const snapshot = this.protocolParamsService.snapshotForChain(intent.srcChain);
-    const fillWindow = snapshot.fillWindowSeconds;
-    return this.repo.acceptIfOpen(id, solver, nowSec + fillWindow, nowSec);
   }
 
   /**

@@ -10,6 +10,7 @@ import {
   Param,
   Post,
   Query,
+  ServiceUnavailableException,
   UseGuards,
 } from "@nestjs/common";
 import {
@@ -65,6 +66,9 @@ import { KillSwitchOperation } from "../killswitch/killswitch.types";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
+import { SolverBondService } from "../soroban/solver-bond.service";
+import { ProtocolParamsService } from "../governance/params.service";
+import { baseUnitsToUsdMicros, intentExposureUsdMicros } from "./intent-exposure";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -77,6 +81,8 @@ export class IntentsController {
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
     config: ConfigService<AppConfig, true>,
+    private readonly solverBondService: SolverBondService,
+    private readonly protocolParamsService: ProtocolParamsService,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
   }
@@ -335,6 +341,7 @@ export class IntentsController {
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
   @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
+  @ApiServiceUnavailableResponse({ description: "Solver bond or a fresh USD price could not be verified" })
   async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
     // Fast-path snapshot only — guards below are advisory. The atomic
     // decision is the conditional `acceptIfOpen` write (state=open AND
@@ -359,13 +366,6 @@ export class IntentsController {
     // Verify the solver controls the claimed address before it can accept.
     verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
 
-    const solver = await this.solversService.get(dto.solver);
-    if (!solver?.isActive) {
-      throw new ForbiddenException("Solver not registered or inactive");
-    }
-    if (!solver.bondAmount || BigInt(solver.bondAmount) <= 0n) {
-      throw new ForbiddenException("Solver has insufficient bond");
-    }
     if (this.solversService.isSuspended(dto.solver)) {
       throw new ForbiddenException("Solver is suspended by an active guardian action");
     }
@@ -375,7 +375,44 @@ export class IntentsController {
       throw new ForbiddenException("Canary intents may only be accepted by canary solvers, and vice versa");
     }
 
-    const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now);
+    const chainBond = await this.solverBondService.getBond(dto.solver);
+    if (!chainBond.isActive || chainBond.bondAmount <= 0n) {
+      throw new ForbiddenException({
+        code: "INSUFFICIENT_BOND",
+        error: "Solver has no active on-chain bond",
+        message: "Solver has no active on-chain bond",
+      });
+    }
+
+    const xlmPrice = await this.tokensService.getUsdPrice("XLM");
+    const bondUsdMicros = baseUnitsToUsdMicros(chainBond.bondAmount, 7, xlmPrice);
+    const candidateExposureUsdMicros = intentExposureUsdMicros(intent, now);
+    const ratio = this.protocolParamsService.getCurrent().maxExposureRatio;
+    if (!Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
+      throw new ServiceUnavailableException({
+        code: "INVALID_EXPOSURE_RATIO",
+        error: "The configured maximum exposure ratio is invalid",
+      });
+    }
+    const ratioScale = 1_000_000_000n;
+    const ratioFixed = BigInt(Math.floor(ratio * Number(ratioScale)));
+    const maxExposureUsdMicros = (bondUsdMicros * ratioFixed) / ratioScale;
+
+    const capacity = await this.intentsService.acceptIfOpenWithinExposure(
+      id,
+      dto.solver,
+      candidateExposureUsdMicros,
+      maxExposureUsdMicros,
+      now,
+    );
+    if (capacity.exposureExceeded) {
+      throw new ForbiddenException({
+        code: "INSUFFICIENT_BOND",
+        error: "Accepted exposure would exceed the solver's bond limit",
+        message: "Accepted exposure would exceed the solver's bond limit",
+      });
+    }
+    const updated = capacity.intent;
     if (!updated) {
       const current = await this.intentsService.get(id);
       if (!current) throw new NotFoundException("Intent not found");

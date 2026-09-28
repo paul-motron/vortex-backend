@@ -3,6 +3,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { IIntentsRepository } from "./intents.repository";
 import { Intent, IntentState, StellarToken, TokenInfo } from "./intents.types";
 import { IntentState as PrismaIntentState, Prisma } from "@prisma/client";
+import { intentExposureUsdMicros } from "./intent-exposure";
 
 /**
  * Prisma-backed implementation of IIntentsRepository.
@@ -115,6 +116,49 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     // Fetch the updated row to return the full intent shape.
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : null;
+  }
+
+  /**
+   * Enforce the solver's exposure ceiling while holding a transaction-scoped
+   * advisory lock, then conditionally accept the intent in that transaction.
+   */
+  async acceptIfOpenWithinExposure(
+    id: string,
+    solver: string,
+    newDeadline: number,
+    now: number,
+    candidateExposureUsdMicros: bigint,
+    maxExposureUsdMicros: bigint,
+  ): Promise<{ intent: Intent | null; exposureExceeded: boolean }> {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${solver.toLowerCase()}))`;
+
+      const accepted = await tx.intent.findMany({
+        where: {
+          solver: { equals: solver, mode: "insensitive" },
+          state: PrismaIntentState.accepted,
+        },
+      });
+      const acceptedExposure = accepted.reduce(
+        (total, row) => total + intentExposureUsdMicros(this.fromRow(row), now),
+        0n,
+      );
+      if (acceptedExposure + candidateExposureUsdMicros > maxExposureUsdMicros) {
+        return { intent: null, exposureExceeded: true };
+      }
+
+      const result = await tx.intent.updateMany({
+        where: { intentId: id, state: PrismaIntentState.open, deadline: { gt: now } },
+        data: {
+          state: PrismaIntentState.accepted,
+          solver,
+          deadline: newDeadline,
+        },
+      });
+      if (result.count === 0) return { intent: null, exposureExceeded: false };
+      const row = await tx.intent.findUnique({ where: { intentId: id } });
+      return { intent: row ? this.fromRow(row) : null, exposureExceeded: false };
+    });
   }
 
   /**

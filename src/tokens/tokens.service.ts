@@ -1,8 +1,9 @@
-import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { SUPPORTED_TOKENS, StellarToken } from "./tokens.data";
 import { SUPPORTED_TOKENS, STELLAR_TOKENS, StellarToken } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
 import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord } from "./tokens.repository";
+import { PriceFeedProvider } from "./price-feed.provider";
 
 /**
  * A resolved source-chain (EVM or Stellar source) token — always has a
@@ -48,11 +49,29 @@ export interface TokensByChainResponse {
 }
 
 @Injectable()
-export class TokensService {
+export class TokensService implements PriceFeedProvider {
   constructor(
     @Inject(TOKENS_REPOSITORY)
     private readonly repo: ITokensRepository,
   ) {}
+
+  /**
+   * Resolve the configured USD price for a symbol. Stellar entries take
+   * precedence when a symbol is shared across chains (notably XLM).
+   */
+  async getUsdPrice(symbol: string): Promise<number> {
+    const matches = this.repo.findAll().filter((token) => token.symbol.toLowerCase() === symbol.toLowerCase());
+    const token = matches.find((candidate) => candidate.chain === "stellar") ?? matches[0];
+    const price = token?.priceUsd;
+    if (price === undefined || price === null || !Number.isFinite(price) || price <= 0) {
+      throw new ServiceUnavailableException({
+        code: "STALE_PRICE",
+        error: `No usable USD price is available for ${symbol}`,
+        message: `No usable USD price is available for ${symbol}`,
+      });
+    }
+    return price;
+  }
 
   /**
    * Look up a source token by chain + address/contract.
