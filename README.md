@@ -11,7 +11,8 @@ of the multi-repo Vortex stack — see also
 [`vortex-contract`](https://github.com/vortex-protocol/vortex-contract) and
 [`vortex-frontend`](https://github.com/vortex-protocol/vortex-frontend).
 
-> The relay currently uses an in-memory store and mock data. Read-only
+> Intents persist to Postgres in production (`INTENTS_STORE=postgres`); local
+> development defaults to an in-memory store seeded with mock data. Read-only
 > Soroban RPC access is live (`/api/v1/chain/*`); writing intent state
 > on-chain is still on the roadmap.
 
@@ -152,8 +153,9 @@ from those that are safe to leave at their testnet/dev defaults.
 | `SOLVER_REGISTRY_CONTRACT_ID` | Yes (on-chain path) | No | 56-char Stellar contract ID of the deployed solver-registry contract |
 | `STELLAR_NETWORK` | Yes | No | Set to `mainnet`; default is `testnet` |
 | `SOROBAN_RPC_URL` | Yes | No | A production-grade Soroban RPC endpoint; the default points at the public testnet |
-| `INTENTS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist intents to Postgres across restarts; `memory` loses all state on restart |
+| `INTENTS_STORE` | Yes — set to `postgres` | `memory` | `memory` loses all intents on restart and cannot scale horizontally. Promote via `dual` per [`docs/runbooks/intents-store-migration.md`](./docs/runbooks/intents-store-migration.md). `INTENTS_PERSISTENCE=prisma` is a deprecated alias for `postgres` |
 | `SOLVERS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist solver registry to Postgres; `memory` loses solver state on restart |
+| `EVM_DEPOSIT_VERIFICATION_ENABLED` | Yes — set to `true` | `false` | EVM-source intents are hidden from solvers until the escrow deposit is confirmed; needs `EVM_RPC_URLS` and `EVM_ESCROW_ADDRESSES`. See [`docs/runbooks/evm-deposit-verification.md`](./docs/runbooks/evm-deposit-verification.md) |
 | `SOROBAN_FEE_PERCENTILE` | Recommended | `p50` | Raise to `p90` on mainnet for better confirmation speed under load |
 | `WS_MAX_CONNECTIONS` | Recommended | `1000` | Tune to expected solver + frontend connection count |
 | `SENTRY_DSN` | Recommended | — (Sentry disabled) | Set to your Sentry project DSN for error alerting |
@@ -197,8 +199,10 @@ versus **planned** (schema/token data in place, on-chain settlement pending).
 | Optimism | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
 | Avalanche | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
 
-> **Contributor note:** EVM chains are accepted in the intent DTO and stored
-> in-memory, but no on-chain settlement or bridging logic is wired up yet.
+> **Contributor note:** EVM chains are accepted in the intent DTO. With
+> `EVM_DEPOSIT_VERIFICATION_ENABLED=true` the backend confirms the user's
+> escrow deposit (`src/chains/evm/`) before the intent is offered to solvers;
+> no settlement or bridging logic is wired up yet.
 > See [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md)
 > for the target design.
 
@@ -207,7 +211,8 @@ versus **planned** (schema/token data in place, on-chain settlement pending).
 ## Roadmap
 
 - [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`
-- [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions (target design: [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md))
+- [x] **Durable intent store** — intents persist to Postgres (`INTENTS_STORE=postgres`) with atomic SQL transitions, optimistic concurrency (`ETag` / `If-Match`) and cross-replica idempotency; migration via a dual-write phase ([runbook](./docs/runbooks/intents-store-migration.md))
+- [ ] **On-chain writes** — back intent state transitions with real Soroban transactions (target design: [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md))
 - [x] **Solver WS client** — reference implementation for a solver bot (`npm run solver:demo`, see [`scripts/README.md`](./scripts/README.md))
 
 ---
@@ -283,6 +288,15 @@ Edit the `thresholds` section in
 section is overwritten automatically by `npm run perf:update-baselines`.
 
 ---
+
+## Preview environments
+
+Every same-repo PR can be deployed to an isolated, seeded preview environment
+(API, Swagger at `/docs`, WebSocket at `/ws`) by adding the **`preview`** label;
+it is torn down on close, on label removal, or after a TTL. See
+[docs/ci/preview-environments.md](./docs/ci/preview-environments.md) for the
+trigger rules, cost cap and required repository configuration. Previews are
+testnet-only with throwaway keys — forked PRs are excluded.
 
 ## Contributing
 

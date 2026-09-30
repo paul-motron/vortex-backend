@@ -183,8 +183,19 @@ describe("WS broadcast fan-out load test (#84)", () => {
   let app: INestApplication;
   let wsUrl: string;
   let gateway: IntentsGateway;
+  let previousMaxPerIp: string | undefined;
 
   beforeAll(async () => {
+    // Every client in this suite connects from 127.0.0.1, so the default
+    // per-IP admission cap (WS_MAX_CONNECTIONS_PER_IP, 20) would reject the
+    // 100- and 500-subscriber tiers at the handshake — the test would then
+    // measure the cap instead of fan-out. Raise it above the largest tier for
+    // this app only; production keeps the default.
+    previousMaxPerIp = process.env.WS_MAX_CONNECTIONS_PER_IP;
+    process.env.WS_MAX_CONNECTIONS_PER_IP = String(
+      Math.max(SUBSCRIBER_TIERS[SUBSCRIBER_TIERS.length - 1] + 100, 1000),
+    );
+
     app = await createTestApp();
     // Listen on a random OS-assigned port to avoid collisions in CI
     await app.listen(0);
@@ -195,6 +206,11 @@ describe("WS broadcast fan-out load test (#84)", () => {
 
   afterAll(async () => {
     await app.close();
+    if (previousMaxPerIp === undefined) {
+      delete process.env.WS_MAX_CONNECTIONS_PER_IP;
+    } else {
+      process.env.WS_MAX_CONNECTIONS_PER_IP = previousMaxPerIp;
+    }
   }, 15_000);
 
   for (const subscriberCount of SUBSCRIBER_TIERS) {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   Account,
   Address,
@@ -162,10 +161,10 @@ function decoded(overrides = {}) {
 
 const allowBoth = {
   ...DEFAULT_POLICY,
-  defaultAction: "deny",
+  defaultAction: "deny" as const,
   rules: [
-    { action: "allow", contractId: CONTRACT_A_HEX, method: "approve" },
-    { action: "allow", contractId: CONTRACT_B_HEX, method: "transfer" },
+    { action: "allow" as const, contractId: CONTRACT_A_HEX, method: "approve" },
+    { action: "allow" as const, contractId: CONTRACT_B_HEX, method: "transfer" },
   ],
 };
 
@@ -189,8 +188,8 @@ describe("signer-policy", () => {
     });
     const policy = {
       ...DEFAULT_POLICY,
-      defaultAction: "deny",
-      rules: [{ action: "allow", contractId: CONTRACT_A_HEX, method: "approve" }],
+      defaultAction: "deny" as const,
+      rules: [{ action: "allow" as const, contractId: CONTRACT_A_HEX, method: "approve" }],
     };
     const result = evaluatePolicy(policy, tx, { nowMs: 1_000 });
     expect(result.status).toBe("deny");
@@ -199,7 +198,7 @@ describe("signer-policy", () => {
 
   it("classic payment op is denied", () => {
     const tx = decoded({ operations: [{ name: "payment" }] });
-    const result = evaluatePolicy({ ...DEFAULT_POLICY, defaultAction: "allow" }, tx, {
+    const result = evaluatePolicy({ ...DEFAULT_POLICY, defaultAction: "allow" as const }, tx, {
       nowMs: 1_000,
     });
     expect(result.status).toBe("deny");
@@ -210,8 +209,8 @@ describe("signer-policy", () => {
     const tx = decoded({ fee: 5_000_000 });
     const policy = {
       ...DEFAULT_POLICY,
-      defaultAction: "allow",
-      rules: [{ action: "allow", contractId: CONTRACT_A_HEX, method: "approve" }],
+      defaultAction: "allow" as const,
+      rules: [{ action: "allow" as const, contractId: CONTRACT_A_HEX, method: "approve" }],
       maxInclusionFee: 1_000,
     };
     const result = evaluatePolicy(policy, tx, { nowMs: 1_000 });
@@ -223,8 +222,8 @@ describe("signer-policy", () => {
     const tx = decoded({ resourceFee: 2_000_000 });
     const policy = {
       ...DEFAULT_POLICY,
-      defaultAction: "allow",
-      rules: [{ action: "allow", contractId: CONTRACT_A_HEX, method: "approve" }],
+      defaultAction: "allow" as const,
+      rules: [{ action: "allow" as const, contractId: CONTRACT_A_HEX, method: "approve" }],
       maxResourceFee: 1_000,
     };
     const result = evaluatePolicy(policy, tx, { nowMs: 1_000 });
@@ -236,8 +235,8 @@ describe("signer-policy", () => {
     const tx = decoded();
     const policy = {
       ...DEFAULT_POLICY,
-      defaultAction: "allow",
-      rules: [{ action: "allow", contractId: CONTRACT_A_HEX, method: "approve" }],
+      defaultAction: "allow" as const,
+      rules: [{ action: "allow" as const, contractId: CONTRACT_A_HEX, method: "approve" }],
       budget: { maxAuthEntries: 0, windowMs: 60_000 },
     };
     const result = evaluatePolicy(policy, tx, {
@@ -260,8 +259,8 @@ describe("signer-policy", () => {
     });
     const policy = {
       ...DEFAULT_POLICY,
-      defaultAction: "allow",
-      rules: [{ action: "allow", contractId: CONTRACT_A_HEX, method: "approve" }],
+      defaultAction: "allow" as const,
+      rules: [{ action: "allow" as const, contractId: CONTRACT_A_HEX, method: "approve" }],
     };
     const result = evaluatePolicy(policy, tx, { nowMs: 1_000 });
     expect(result.status).toBe("deny");
@@ -309,7 +308,7 @@ describe("signer-policy", () => {
   it("alert fires on deny", async () => {
     const emitSpy = jest.spyOn(AlertSink.prototype, "emit").mockResolvedValue(undefined);
     const tx = decoded({ operations: [{ name: "payment" }] });
-    evaluatePolicy({ ...DEFAULT_POLICY, defaultAction: "allow" }, tx, {
+    evaluatePolicy({ ...DEFAULT_POLICY, defaultAction: "allow" as const }, tx, {
       nowMs: 1_000,
       alertSink: new AlertSink("https://example.invalid/wh"),
     });

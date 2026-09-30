@@ -11,6 +11,7 @@ import { IntentCapabilityIndex } from "../../src/intents/solver-intent-matcher";
 import { MetricsService } from "../../src/metrics/metrics.service";
 import { Backplane, WS_BACKPLANE } from "../../src/intents/backplane/backplane.types";
 import { MemoryBackplane } from "../../src/intents/backplane/memory.backplane";
+import { IntentFeedService } from "../../src/intents/feed/intent-feed.service";
 
 export interface WsTestApp {
   app: INestApplication;
@@ -56,6 +57,10 @@ export async function createWsTestApp(opts: {
         },
       },
       { provide: IntentCapabilityIndex, useValue: { getEligibleFor: () => [], addIntent: () => undefined, removeIntent: () => undefined } },
+      // The gateway delegates sequencing, replay and delivery to the
+      // transport-agnostic feed service (issue #433), so the WS test harness has
+      // to provide it too.
+      IntentFeedService,
     ],
   }).compile();
 

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Keypair } from "@stellar/stellar-sdk";
-import { messages, signAccept, signCancel, signFill, signMessage, signWsAuth, VortexWsClient, IntentEvent } from "../packages/solver-sdk/src";
+import { messages, messagesV2, signAccept, signCancel, signEvmCancelIntent, signEvmCreateIntent, signFill, signMessage, signWsAuth, VortexWsClient, IntentEvent } from "../packages/solver-sdk/src";
+import { privateKeyToAccount } from "viem/accounts";
 import { signHs256Jwt } from "../src/common/jwt";
 import { createWsTestApp, waitFor, WsTestApp } from "./utils/create-ws-test-app";
 
@@ -34,6 +35,48 @@ describe("solver SDK signing vectors", () => {
     expect(signFill(kp, intentId, "100").signature).toBe(byKind.fill);
     expect(signCancel(kp, intentId).signature).toBe(byKind.cancel);
     expect(signWsAuth(kp, timestamp).signature).toBe(byKind.wsAuth);
+
+    const context = { ...vectors.v2Context };
+    const v2Messages: Record<string, string> = {
+      accept: messagesV2.accept(intentId, kp.publicKey(), context),
+      fill: messagesV2.fill(intentId, kp.publicKey(), "1000", undefined, context),
+      cancel: messagesV2.cancel(intentId, kp.publicKey(), context),
+    };
+    for (const vector of vectors.v2Vectors) {
+      expect(v2Messages[vector.kind]).toBe(vector.message);
+      expect(signMessage(kp, vector.message)).toBe(vector.signature);
+    }
+  });
+
+  it("builds EIP-712 create and cancel request bodies for EVM accounts", async () => {
+    const evmPrivateKey = `0x${"11".repeat(32)}` as `0x${string}`;
+    const evmAccount = privateKeyToAccount(evmPrivateKey);
+    const evmDomain = {
+      chainId: 1,
+      verifyingContract: "0x0000000000000000000000000000000000000001" as const,
+    };
+    const expiresAt = Math.floor(Date.now() / 1000) + 300;
+    const common = {
+      user: evmAccount.address,
+      srcTokenAddress: "0x0000000000000000000000000000000000000002" as const,
+      srcTokenSymbol: "USDC",
+      srcTokenDecimals: 6,
+      srcAmount: "1000000",
+      dstTokenContract: "CDLZFC3SYJYDZT7K67CG2ZMSVXTXRUWDCQ3NDADYQV67QX2PVJ6C6S6D",
+      dstTokenSymbol: "USDC",
+      dstTokenDecimals: 6,
+      minDstAmount: "990000",
+      deadline: expiresAt + 900,
+      nonce: "0123456789abcdef0123456789abcdef",
+      expiresAt,
+    };
+    const create = await signEvmCreateIntent(evmPrivateKey, evmDomain, common);
+    const cancel = await signEvmCancelIntent(evmPrivateKey, evmDomain, intentId, common.nonce, expiresAt);
+
+    expect(create.user).toBe(evmAccount.address);
+    expect(create.signature).toMatch(/^0x(?:[0-9a-f]{2}){65}$/i);
+    expect(cancel.user).toBe(evmAccount.address);
+    expect(cancel.signature).toMatch(/^0x(?:[0-9a-f]{2}){65}$/i);
   });
 });
 

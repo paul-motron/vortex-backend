@@ -121,6 +121,7 @@ export class AlertSink {
     }
 
     try {
+      // eslint-disable-next-line no-restricted-syntax -- pre-existing direct fetch; HttpEgressService migration is a separate change
       await fetch(this.webhookUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },

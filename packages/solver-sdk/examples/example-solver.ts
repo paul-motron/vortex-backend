@@ -28,8 +28,11 @@ ws.on("event", async (event) => {
   if (event.type !== "intent_created" || !event.intent) return;
   const intent = event.intent as { intentId: string; minDstAmount: string };
   try {
-    await rest.accept(intent.intentId, signAccept(keypair, intent.intentId));
-    await rest.fill(intent.intentId, signFill(keypair, intent.intentId, intent.minDstAmount, `example-${Date.now()}`));
+    await rest.accept(intent.intentId, signAccept(keypair, intent.intentId, { network: "testnet" }));
+    await rest.fill(
+      intent.intentId,
+      signFill(keypair, intent.intentId, intent.minDstAmount, `example-${Date.now()}`, { network: "testnet" }),
+    );
     console.log(`filled ${intent.intentId} (seq ${event.seq})`);
   } catch (err) {
     console.error(`intent ${intent.intentId}: ${(err as Error).message}`);

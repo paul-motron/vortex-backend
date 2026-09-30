@@ -109,8 +109,10 @@ describe('HttpEgressService', () => {
 
   describe('DNS rebinding protection', () => {
     it('should detect DNS rebinding when IPs differ', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- test mock, no import alternative
       const originalLookup = require('node:dns/promises').lookup;
       let callCount = 0;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- test mock, no import alternative
       jest.spyOn(require('node:dns/promises'), 'lookup').mockImplementation(async () => {
         callCount++;
         return {

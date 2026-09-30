@@ -173,6 +173,7 @@ export class VaultTransitSigner implements ISigner, OnModuleInit {
 
     let res: Response;
     try {
+      // eslint-disable-next-line no-restricted-syntax -- pre-existing direct fetch; HttpEgressService migration is a separate change
       res = await fetch(url, {
         method: "POST",
         headers: {
@@ -216,6 +217,7 @@ export class VaultTransitSigner implements ISigner, OnModuleInit {
 
     let res: Response;
     try {
+      // eslint-disable-next-line no-restricted-syntax -- pre-existing direct fetch; HttpEgressService migration is a separate change
       res = await fetch(url, {
         method: "GET",
         headers: { "X-Vault-Token": this.vaultToken },

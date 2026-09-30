@@ -23,6 +23,8 @@ const vectors = JSON.parse(
   publicKey: string;
   intentId: string;
   timestamp: number;
+  v2Context: { network: string; nonce: string; expiresAt: number };
+  v2Vectors: Array<{ kind: "accept" | "fill" | "cancel"; message: string; signature: string }>;
   vectors: Array<{ kind: string; message: string; signature: string }>;
 };
 
@@ -43,6 +45,16 @@ describe("shared signature test vectors", () => {
 
   it.each(vectors.vectors)("$kind: server builds the same message and accepts the signature", ({ kind, message, signature }) => {
     expect(serverMessages[kind]).toBe(message);
+    expect(() => verifyStellarSignature(publicKey, message, signature)).not.toThrow();
+  });
+
+  it.each(vectors.v2Vectors)("v2 $kind: server builds the same message and accepts the signature", ({ kind, message, signature }) => {
+    const v2Messages = {
+      accept: buildAcceptMessage(intentId, publicKey, vectors.v2Context),
+      fill: buildFillMessage(intentId, publicKey, vectors.v2Context, { fillAmount: "1000" }),
+      cancel: buildCancelMessage(intentId, vectors.v2Context, publicKey),
+    };
+    expect(v2Messages[kind]).toBe(message);
     expect(() => verifyStellarSignature(publicKey, message, signature)).not.toThrow();
   });
 });

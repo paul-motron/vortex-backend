@@ -46,7 +46,18 @@ describe("IntentsController (e2e)", () => {
   // Each call defaults to a distinct user address so the per-user create
   // throttle (10 / 60 s, issue #45) never trips across the suite.
   let userSeq = 0;
-  async function createIntent(overrides: Partial<typeof validCreateBody> = {}) {
+  async function createIntent(
+    overrides: Partial<typeof validCreateBody> & {
+      deadline?: number;
+      auction?: {
+        startDstAmount: string;
+        decayStart: number;
+        decayEnd: number;
+        exclusiveSolver?: string;
+        exclusivityEnd?: number;
+      };
+    } = {},
+  ) {
     const res = await request(app.getHttpServer())
       .post("/api/v1/intents")
       .send({
@@ -160,6 +171,67 @@ describe("IntentsController (e2e)", () => {
     expect(filled.body.txHash).toBe("e2e-hash");
   });
 
+  it("Dutch auction locks the accept price and enforces exclusivity and the fill floor", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const created = await createIntent({
+      deadline: now + 600,
+      auction: {
+        startDstAmount: "1100000",
+        decayStart: now + 60,
+        decayEnd: now + 180,
+        exclusiveSolver: ALPHA_KP.publicKey(),
+        exclusivityEnd: now + 30,
+      },
+    });
+    const price = await request(app.getHttpServer())
+      .get(`/api/v1/intents/${created.intentId}/auction`)
+      .expect(200);
+    expect(price.body.currentDstAmount).toBe("1100000");
+
+    const expiresAt = now + 300;
+    const betaNonce = `beta-${created.intentId}`;
+    const betaContext = { network: "testnet", nonce: betaNonce, expiresAt };
+    const betaSignature = sign(BETA_KP, buildAcceptMessage(created.intentId, BETA_KP.publicKey(), betaContext));
+    await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/accept`)
+      .send({ solver: BETA_KP.publicKey(), nonce: betaNonce, expiresAt, signature: betaSignature })
+      .expect(403);
+
+    const acceptNonce = `alpha-${created.intentId}`;
+    const acceptContext = { network: "testnet", nonce: acceptNonce, expiresAt };
+    const acceptSignature = sign(ALPHA_KP, buildAcceptMessage(created.intentId, ALPHA_KP.publicKey(), acceptContext));
+    const accepted = await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/accept`)
+      .send({ solver: ALPHA_KP.publicKey(), nonce: acceptNonce, expiresAt, signature: acceptSignature })
+      .expect(201);
+    expect(accepted.body.acceptedDstAmount).toBe("1100000");
+
+    const belowAmount = "1099999";
+    const belowNonce = `below-${created.intentId}`;
+    const belowContext = { network: "testnet", nonce: belowNonce, expiresAt };
+    const belowSignature = sign(
+      ALPHA_KP,
+      buildFillMessage(created.intentId, ALPHA_KP.publicKey(), belowContext, { fillAmount: belowAmount }),
+    );
+    await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/fill`)
+      .send({ solver: ALPHA_KP.publicKey(), fillAmount: belowAmount, nonce: belowNonce, expiresAt, signature: belowSignature })
+      .expect(400);
+
+    const fillAmount = "1100000";
+    const fillNonce = `fill-${created.intentId}`;
+    const fillContext = { network: "testnet", nonce: fillNonce, expiresAt };
+    const fillSignature = sign(
+      ALPHA_KP,
+      buildFillMessage(created.intentId, ALPHA_KP.publicKey(), fillContext, { fillAmount }),
+    );
+    const filled = await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/fill`)
+      .send({ solver: ALPHA_KP.publicKey(), fillAmount, nonce: fillNonce, expiresAt, signature: fillSignature })
+      .expect(201);
+    expect(filled.body.fillAmount).toBe(fillAmount);
+  });
+
   it("fill amount below minimum returns the original custom error shape", async () => {
     const created = await createIntent();
     const acceptSig = sign(ALPHA_KP, buildAcceptMessage(created.intentId, ALPHA_KP.publicKey()));
@@ -189,7 +261,7 @@ describe("IntentsController (e2e)", () => {
       .expect(201);
 
     const intentsService = app.get(IntentsService);
-    await intentsService.update(created.intentId, { minDstAmount: "not-a-number" });
+    await intentsService.update(created.intentId, { minDstAmount: "not-a-number" }, (await intentsService.get(created.intentId))!.version);
 
     const fillSig = sign(ALPHA_KP, buildFillMessage(created.intentId, ALPHA_KP.publicKey()));
     const res = await request(app.getHttpServer())
@@ -497,7 +569,9 @@ describe("IntentsController (e2e)", () => {
     const res = await request(app.getHttpServer())
       .post("/api/v1/intents/batch")
       .send({ intentIds: [a.intentId, b.intentId, "does-not-exist"] })
-      .expect(201);
+      // 200, not the 201 Nest infers for @Post: this is a read-only lookup
+      // (see @HttpCode on IntentsController.batchLookup).
+      .expect(200);
 
     expect(res.body.count).toBe(2);
     const ids = res.body.intents.map((i: { intentId: string }) => i.intentId).sort();
@@ -508,7 +582,7 @@ describe("IntentsController (e2e)", () => {
     const res = await request(app.getHttpServer())
       .post("/api/v1/intents/batch")
       .send({ intentIds: ["nope-1", "nope-2"] })
-      .expect(201);
+      .expect(200);
 
     expect(res.body).toEqual({ intents: [], count: 0 });
   });

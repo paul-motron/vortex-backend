@@ -98,6 +98,19 @@ model Intent {
   feeAmount      String?     @map("fee_amount")
   /// On-chain transaction hash of the Stellar fill transaction.
   txHash         String?     @map("tx_hash")
+  /// Unix epoch seconds – set when state becomes `slashed`.
+  slashedAt      Int?        @map("slashed_at")
+  slashReason    String?     @map("slash_reason")
+  /// Optimistic-concurrency version, incremented on every update (issue #405).
+  version        Int         @default(0) @map("version")
+  /// Caller-supplied idempotency key for POST /intents; unique across replicas (issue #404).
+  idempotencyKey String?     @unique @map("idempotency_key")
+  /// Source-chain escrow deposit confirmed (issue #403); unverified intents are not fillable.
+  srcVerified    Boolean     @default(false) @map("src_verified")
+  /// EVM deposit transaction hash supplied at creation, if any.
+  srcTxHash      String?     @map("src_tx_hash")
+  /// Last verification result: status, block, received amount, detail.
+  srcVerification Json?      @map("src_verification")
 
   @@index([user])
   @@index([state])
@@ -164,6 +177,30 @@ model IntentAuditLog {
 
   @@index([intentId, timestamp(sort: Asc)], name: "audit_log_intent_idx")
   @@map("intent_audit_log")
+}
+
+// ─── ContractUpgrade ─────────────────────────────────────────────────────────
+// Append-only history of detected WASM upgrades of the contracts the backend
+// writes to (issue #402). Written by ContractVersionService when a poll sees
+// a new hash or an upgrade event is ingested.
+
+model ContractUpgrade {
+  id               BigInt   @id @default(autoincrement()) @map("id")
+  /// "settlement" | "solverRegistry"
+  contractName     String   @map("contract_name")
+  contractId       String   @map("contract_id")
+  previousWasmHash String?  @map("previous_wasm_hash")
+  wasmHash         String?  @map("wasm_hash")
+  /// ABI version the new hash maps to; null when unsupported.
+  abiVersion       String?  @map("abi_version")
+  /// "poll" | "event"
+  source           String   @map("source")
+  ledger           Int?     @map("ledger")
+  txHash           String?  @map("tx_hash")
+  detectedAt       DateTime @default(now()) @map("detected_at") @db.Timestamptz
+
+  @@index([contractId, detectedAt], name: "contract_upgrades_contract_idx")
+  @@map("contract_upgrades")
 }
 
 // ─── Token ───────────────────────────────────────────────────────────────────
@@ -450,4 +487,97 @@ model GuardianAction {
 
   @@index([active])
   @@map("guardian_actions")
+}
+
+// ─── OnchainOutbox ───────────────────────────────────────────────────────────
+// Transactional outbox for on-chain writes (issue #396). A row is inserted in
+// the same database transaction as the intent mutation it mirrors, and
+// OutboxRelayService submits it to Soroban afterwards — so the DB can never say
+// "accepted" while the corresponding transaction silently never went out.
+//
+// `id` is a monotonically increasing sequence and doubles as the per-intent
+// ordering key: a row is only claimable once every earlier row for the same
+// intent has reached a terminal success state.
+
+enum OutboxStatus {
+  pending
+  processing
+  submitted
+  confirmed
+  simulated
+  dead
+}
+
+model OnchainOutbox {
+  id            BigInt       @id @default(autoincrement()) @map("id")
+  /// intents.intent_id this operation belongs to (ordering partition key).
+  intentId      String       @map("intent_id")
+  /// Contract operation, e.g. "create_intent", "accept_intent".
+  operation     String       @map("operation")
+  /// Operation arguments (JSON-safe, bigint amounts as strings).
+  payload       Json         @map("payload")
+  status        OutboxStatus @default(pending) @map("status")
+  /// Number of times this row has been claimed by a relay worker.
+  attempts      Int          @default(0) @map("attempts")
+  nextAttemptAt DateTime     @default(now()) @map("next_attempt_at") @db.Timestamptz
+  /// Lease expiry while status = processing; a crashed worker's row is reclaimed after this.
+  lockedUntil   DateTime?    @map("locked_until") @db.Timestamptz
+  /// Hash of the signed envelope, persisted BEFORE submission (crash idempotency).
+  envelopeHash  String?      @map("envelope_hash")
+  /// Hash of the transaction that was submitted.
+  txHash        String?      @map("tx_hash")
+  lastError     String?      @map("last_error")
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([status, nextAttemptAt], name: "onchain_outbox_claim_idx")
+  @@index([intentId, id], name: "onchain_outbox_intent_order_idx")
+  @@map("onchain_outbox")
+}
+
+// ─── PendingSlash ────────────────────────────────────────────────────────────
+// Durable saga state for a solver slash (issue #397):
+//   detected → challenge_window → submitted → confirmed | cancelled
+// The unique constraint on intent_id enforces exactly-once slashing per intent.
+
+enum PendingSlashState {
+  detected
+  challenge_window
+  submitted
+  confirmed
+  cancelled
+}
+
+model PendingSlash {
+  id              String            @id @default(uuid()) @map("id")
+  intentId        String            @unique @map("intent_id")
+  solverAddress   String            @map("solver_address")
+  reason          String            @map("reason")
+  state           PendingSlashState @default(detected) @map("state")
+  /// The intent's fill deadline (unix seconds) that the solver missed.
+  fillDeadline    Int               @map("fill_deadline")
+  detectedAt      DateTime          @map("detected_at") @db.Timestamptz
+  /// Slash may not be submitted before this instant.
+  challengeEndsAt DateTime          @map("challenge_ends_at") @db.Timestamptz
+  attempts        Int               @default(0) @map("attempts")
+  nextAttemptAt   DateTime          @default(now()) @map("next_attempt_at") @db.Timestamptz
+  /// Lease held by the pipeline worker that is currently verifying/submitting.
+  lockedUntil     DateTime?         @map("locked_until") @db.Timestamptz
+  txHash          String?           @map("tx_hash")
+  /// true when the registry client simulated but did not broadcast (dry-run / gated submit).
+  simulated       Boolean           @default(false) @map("simulated")
+  submittedAt     DateTime?         @map("submitted_at") @db.Timestamptz
+  confirmedAt     DateTime?         @map("confirmed_at") @db.Timestamptz
+  cancelledAt     DateTime?         @map("cancelled_at") @db.Timestamptz
+  cancelReason    String?           @map("cancel_reason")
+  cancelledBy     String?           @map("cancelled_by")
+  /// Fill transaction that cancelled the slash, when cancelled by a fill proof.
+  fillTxHash      String?           @map("fill_tx_hash")
+  lastError       String?           @map("last_error")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([state, challengeEndsAt], name: "pending_slashes_due_idx")
+  @@index([solverAddress], name: "pending_slashes_solver_idx")
+  @@map("pending_slashes")
 }

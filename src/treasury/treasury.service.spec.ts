@@ -4,9 +4,26 @@ import { TreasuryService } from "./treasury.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { SorobanService } from "../soroban/soroban.service";
 
+/**
+ * The Prisma delegates this suite stubs. `jest.Mocked<T>` is shallow, so the
+ * model delegates (objects, not methods) would keep their real Prisma types;
+ * this local shape keeps every stub a `jest.Mock` with `mockResolvedValue`.
+ */
+type MockPrisma = {
+  feeLedger: { create: jest.Mock; findMany: jest.Mock };
+  slashLedger: { create: jest.Mock; findMany: jest.Mock };
+  refundLedger: { create: jest.Mock; findMany: jest.Mock };
+  treasurySnapshot: { upsert: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
+};
+
 describe("TreasuryService", () => {
   let service: TreasuryService;
-  let prisma: jest.Mocked<PrismaService>;
+  let prisma: MockPrisma;
+  // The mock Prisma only carries the ledger delegates the service touches;
+  // type as `any` so the per-method `mockResolvedValue` calls type-check
+  // (jest.Mocked does not deep-transform nested Prisma delegates).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let prisma: any;
   let soroban: jest.Mocked<SorobanService>;
   let configService: jest.Mocked<ConfigService>;
 
@@ -52,7 +69,12 @@ describe("TreasuryService", () => {
     }).compile();
 
     service = module.get<TreasuryService>(TreasuryService);
-    prisma = module.get(PrismaService) as jest.Mocked<PrismaService>;
+    prisma = mockPrisma;
+    // The mock Prisma only carries the ledger delegates the service touches;
+    // cast to `any` so the per-method `mockResolvedValue` calls type-check
+    // (jest.Mocked does not deep-transform nested Prisma delegates).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    prisma = module.get(PrismaService) as any;
     soroban = module.get(SorobanService) as jest.Mocked<SorobanService>;
     configService = module.get(ConfigService) as jest.Mocked<ConfigService>;
   });

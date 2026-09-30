@@ -3,8 +3,8 @@ import { Test } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
-import { json } from "express";
 import { json, Request, Response, NextFunction } from "express";
+import helmet from "helmet";
 import { AppModule } from "../../src/app.module";
 import { AppConfig } from "../../src/config/configuration";
 import { HttpExceptionFilter } from "../../src/common/http-exception.filter";
@@ -28,15 +28,39 @@ export class MockPrismaService {
     create: jest.fn().mockResolvedValue({}),
     findMany: jest.fn().mockResolvedValue([]),
   };
+
+  // Issue #443: solver credential store. Solvers deregistration sweeps every
+  // active credential for the solver, so the deregister e2e path exercises it.
+  solverCredential = {
+    findMany: jest.fn().mockResolvedValue([]),
+    findUnique: jest.fn().mockResolvedValue(null),
+    findFirst: jest.fn().mockResolvedValue(null),
+    create: jest.fn().mockResolvedValue({}),
+    update: jest.fn().mockResolvedValue({}),
+    updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    delete: jest.fn().mockResolvedValue({ count: 0 }),
+    deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+    count: jest.fn().mockResolvedValue(0),
+  };
+}
+
+/**
+ * With INTENTS_STORE=postgres|dual (issue #404 — CI runs the suite both ways)
+ * the real PrismaService is used against DATABASE_URL; otherwise the stub
+ * above keeps the suite database-free.
+ */
+function usesRealDatabase(): boolean {
+  return process.env.INTENTS_STORE === "postgres" || process.env.INTENTS_STORE === "dual";
 }
 
 export async function createTestApp(): Promise<INestApplication> {
-  const moduleRef = await Test.createTestingModule({
+  const builder = Test.createTestingModule({
     imports: [AppModule],
-  })
-    .overrideProvider(PrismaService)
-    .useClass(MockPrismaService)
-    .compile();
+  });
+  if (!usesRealDatabase()) {
+    builder.overrideProvider(PrismaService).useClass(MockPrismaService);
+  }
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication();
 
@@ -68,6 +92,34 @@ export async function createTestApp(): Promise<INestApplication> {
 
     next();
   });
+
+  // Mirror main.ts so the security headers under test are actually present.
+  // Without helmet here, assertions such as "returns X-Content-Type-Options:
+  // nosniff" measure the test harness rather than the application.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+          defaultSrc: ["'self'"],
+          baseUri: ["'self'"],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'"],
+          frameAncestors: ["'none'"],
+          imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
+          objectSrc: ["'none'"],
+          // Swagger UI bundles need inline scripts and CDN resources.
+          scriptSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
+          styleSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
+        },
+      },
+      hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+      frameguard: { action: "deny" },
+      noSniff: true,
+      referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
 
   app.useWebSocketAdapter(new WsAdapter(app));
   app.useGlobalFilters(new HttpExceptionFilter());

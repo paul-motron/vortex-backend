@@ -8,6 +8,7 @@ import { INestApplication, ValidationPipe } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { ConfigService } from "@nestjs/config";
+import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import helmet from "helmet";
 import request from "supertest";
 import { AppModule } from "../src/app.module";
@@ -42,7 +43,12 @@ async function createAppWithOrigin(origin: string): Promise<INestApplication> {
 
 async function createAppWithSecurityHeaders(nodeEnv = "development"): Promise<INestApplication> {
   const previousNodeEnv = process.env.NODE_ENV;
+  const previousAllowLocalSigner = process.env.ALLOW_LOCAL_SIGNER_IN_PROD;
   process.env.NODE_ENV = nodeEnv;
+  // The app refuses to boot in production with the local keypair signer, which
+  // is the right production guard but unrelated to the security headers and
+  // Swagger-visibility behaviour this suite exercises. Opt in for the boot only.
+  if (nodeEnv === "production") process.env.ALLOW_LOCAL_SIGNER_IN_PROD = "true";
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
@@ -72,9 +78,27 @@ async function createAppWithSecurityHeaders(nodeEnv = "development"): Promise<IN
   app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
+  // Mirror main.ts: serve the OpenAPI document, and only mount the Swagger UI
+  // outside production. Without this the /docs and /docs-json assertions below
+  // would 404 regardless of the security headers under test.
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle("Vortex Backend")
+    .setDescription("Intent relay API + WebSocket feed for Vortex Protocol")
+    .setVersion("0.1.0")
+    .build();
+  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  if (nodeEnv !== "production") {
+    SwaggerModule.setup("docs", app, document);
+  }
+
   await app.init();
 
   process.env.NODE_ENV = previousNodeEnv;
+  if (previousAllowLocalSigner === undefined) {
+    delete process.env.ALLOW_LOCAL_SIGNER_IN_PROD;
+  } else {
+    process.env.ALLOW_LOCAL_SIGNER_IN_PROD = previousAllowLocalSigner;
+  }
   return app;
 }
 

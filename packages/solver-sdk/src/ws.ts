@@ -4,9 +4,11 @@ import WebSocket from "ws";
 /** Server → client frames (see src/intents/intents.gateway.ts). */
 export type IntentEvent = {
   seq: number;
-  type: "intent_created" | "intent_accepted" | "intent_filled" | "intent_cancelled" | "intent_expired" | "intent_slashed" | string;
+  type: "intent_created" | "intent_accepted" | "intent_filled" | "intent_cancelled" | "intent_expired" | "intent_slashed" | "auction_price" | string;
   intentId?: string;
   intent?: Record<string, unknown>;
+  currentDstAmount?: string;
+  timestamp?: number;
   [key: string]: unknown;
 };
 

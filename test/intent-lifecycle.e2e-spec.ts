@@ -12,14 +12,13 @@ import { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { Keypair } from "@stellar/stellar-sdk";
 import { createTestApp } from "./utils/create-test-app";
-import { IntentsService, MAX_OPEN_INTENTS_PER_USER } from "../src/intents/intents.service";
+import { IntentsService, MAX_OPEN_INTENTS_PER_USER, NewIntentData } from "../src/intents/intents.service";
 import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
 import {
   buildAcceptMessage,
   buildCancelMessage,
   buildFillMessage,
 } from "../src/common/stellar-signature";
-import { Intent } from "../src/intents/intents.types";
 
 const ALPHA_KP = SEED_SOLVER_KEYPAIRS.ALPHA;
 const BETA_KP = SEED_SOLVER_KEYPAIRS.BETA;
@@ -262,7 +261,7 @@ describe("Intent lifecycle e2e (create → accept → fill)", () => {
     const CAP_USER = SECOND_USER_KP.publicKey();
     const intentsService = app.get(IntentsService);
 
-    const seed = (): Omit<Intent, "intentId" | "createdAt" | "state"> => ({
+    const seed = (): NewIntentData => ({
       user: CAP_USER,
       srcChain: "ethereum",
       srcToken: SEED_SRC_TOKEN,

@@ -148,6 +148,43 @@ on this highest-risk subset mandatory, not optional.
 If you discover a security vulnerability, please report it privately to the
 maintainers rather than opening a public issue.
 
+## Stellar Intent Signatures (issue #462)
+
+Accept, fill, and cancel requests use the v2 message format:
+
+```
+vortex:<network>:<action>:<intentId>:<nonce>:<expiresAt>:<payloadHash>
+```
+
+`network` is the configured Stellar network, `nonce` is a random single-use
+value, `expiresAt` is a Unix timestamp no more than 15 minutes ahead, and
+`payloadHash` is the SHA-256 hash of the action payload's canonical JSON. The
+server verifies the signature and all request constraints before atomically
+consuming `(signer, nonce)`. Reuse returns `409 NONCE_REUSED`; consumed nonce
+rows expire after the request's expiry plus clock-skew tolerance.
+
+Version 1 signatures omit the domain, expiry, and nonce and are rejected by
+default. Set `ALLOW_LEGACY_STELLAR_SIGNATURES=true` only for the temporary
+client migration window; `vortex_legacy_stellar_signatures_total` reports
+accepted v1 requests by action so operators can determine when to disable the
+flag. The flag must be removed after clients have migrated.
+
+## EVM Intent Signatures (issue #463)
+
+EVM create/cancel signatures use EIP-712 with domain name `Vortex`, version
+`1`, the fixed chain ID for `srcChain`, and that chain's configured escrow as
+`verifyingContract`. `CreateIntent` signs all source/destination token fields,
+amounts, deadline, nonce, and expiry. `CancelIntent` signs the creator,
+intent ID, nonce, and expiry. SDK helpers are exported from
+`@vortex/solver-sdk`; EOA recovery rejects high-s signatures. If recovery does
+not match, the configured chain RPC is queried for ERC-1271
+`isValidSignature(bytes32,bytes)`. EVM RPC hosts must be explicitly listed in
+`EVM_RPC_ALLOWLIST`; RPC errors fail closed. Create and cancel nonces share the
+same persistent `(signer, nonce)` uniqueness constraint as Stellar actions.
+Configure the matching `*_RPC_URL` and `*_ESCROW_ADDRESS` values for each EVM
+source chain; the EIP-712 chain ID is fixed by `srcChain` and cannot be supplied
+by the request.
+
 ## SSRF Protection
 
 All outbound HTTP requests (RPC, Horizon, oracles, webhooks) are routed through `HttpEgressService` which enforces:

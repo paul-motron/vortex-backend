@@ -88,6 +88,10 @@ describe("DoS / resource-exhaustion limits (issue #476)", () => {
 
   beforeAll(async () => {
     app = await createTestApp();
+    // Bind an ephemeral port: the WS sections below read the real port off
+    // httpServer.address(), which is null for an initialised-but-not-listening
+    // app. Port 0 lets the OS pick, so parallel suites never collide.
+    await app.listen(0);
     httpServer = app.getHttpServer();
   });
 

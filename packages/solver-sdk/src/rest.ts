@@ -36,6 +36,15 @@ export class VortexRestClient {
     return this.request<Record<string, unknown>>("GET", `/api/v1/intents/${encodeURIComponent(id)}`);
   }
 
+  getAuctionPrice(id: string) {
+    return this.request<{
+      intentId: string;
+      currentDstAmount: string;
+      acceptedDstAmount?: string;
+      timestamp: number;
+    }>("GET", `/api/v1/intents/${encodeURIComponent(id)}/auction`);
+  }
+
   listOpenIntents() {
     return this.request<{ intents: Array<Record<string, unknown>> }>("GET", "/api/v1/intents/open");
   }

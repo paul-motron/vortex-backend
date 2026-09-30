@@ -211,6 +211,7 @@ export async function fetchIssue(
   token: string,
 ): Promise<GitHubIssue> {
   const url = `${GH_API}/repos/${repo}/issues/${issueNumber}`;
+  // eslint-disable-next-line no-restricted-syntax -- standalone script, no HttpEgressService in scope
   const res = await fetch(url, { headers: ghHeaders(token) });
   if (!res.ok) {
     throw new Error(`GitHub API error fetching issue #${issueNumber}: ${res.status} ${res.statusText}`);
@@ -230,6 +231,7 @@ export async function fetchClosingPRs(
   // GitHub doesn't have a direct "closing PRs" endpoint in REST v3 — we use
   // the timeline events to find cross-reference events with "closed" source.
   const url = `${GH_API}/repos/${repo}/issues/${issueNumber}/timeline?per_page=100`;
+  // eslint-disable-next-line no-restricted-syntax -- standalone script, no HttpEgressService in scope
   const res = await fetch(url, {
     headers: {
       ...ghHeaders(token),
@@ -262,6 +264,7 @@ export async function listMergedPRs(
   perPage = 100,
 ): Promise<GitHubPR[]> {
   const url = `${GH_API}/repos/${repo}/pulls?state=closed&per_page=${perPage}&sort=updated&direction=desc`;
+  // eslint-disable-next-line no-restricted-syntax -- standalone script, no HttpEgressService in scope
   const res = await fetch(url, { headers: ghHeaders(token) });
   if (!res.ok) {
     throw new Error(`GitHub API error listing PRs: ${res.status} ${res.statusText}`);

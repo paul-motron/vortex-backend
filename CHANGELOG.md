@@ -28,6 +28,17 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 ## [Unreleased]
 
 ### Added
+- Transactional outbox for on-chain writes: `onchain_outbox` table, intent change + outbox
+  row committed in one Prisma transaction, `OutboxRelayService` (SKIP LOCKED claims, per-intent
+  ordering, envelope hash persisted before submit, dead-lettering with alert),
+  `TxConfirmationService`, live `StellarTxService.invokeContract` submit path, and
+  `POST /api/v1/admin/outbox/:id/requeue` (Closes #396)
+- Durable solver slashing saga: `pending_slashes` table (exactly-once per intent),
+  configurable challenge window, on-chain re-verification with clock-skew tolerance,
+  solver fill-proof and admin cancellation endpoints, compensation via `rollbackPenalty`,
+  metrics, alert rules and `docs/runbooks/slash-cancellation.md` (Closes #397)
+- Admin slash cancellation and outbox requeue use the shared `AdminGuard` RBAC (`x-admin-key`)
+  and are recorded in `admin_audit_log`
 - `scripts/generate-client.ts` — generates a typed TypeScript API client from the live
   OpenAPI spec using `openapi-typescript` v7; output committed to `src/generated/`
   (Closes #134)
@@ -72,6 +83,10 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
   `npm run test:scripts` (see `prisma/migrations/README.md`)
 
 ### Fixed
+- `SorobanModule` referenced `forwardRef`/`IntentsModule` without importing them; it now
+  imports `SolversModule` (what `EventIngestionService` actually needs)
+- e2e `@stellar/stellar-sdk` mock now re-exports the real SDK and stubs only
+  `SorobanRpc.Server` (it previously lacked `Networks`, `Keypair`, … so no e2e suite could load)
 - `IntentsService.create()` idempotency-key handling is now race-safe — concurrent
   requests carrying the same key synchronously claim an in-flight slot before any
   `await`, so exactly one intent is created and the losers replay its result

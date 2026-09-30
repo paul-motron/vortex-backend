@@ -27,9 +27,9 @@ const ws = new VortexWsClient({
 ws.on("event", async (event) => {
   if (event.type !== "intent_created") return;
   const id = (event.intent as { intentId: string }).intentId;
-  await rest.accept(id, signAccept(keypair, id));
+  await rest.accept(id, signAccept(keypair, id, { network: "testnet" }));
   // ...settle on Stellar, then:
-  await rest.fill(id, signFill(keypair, id, "1000000", "<stellar tx hash>"));
+  await rest.fill(id, signFill(keypair, id, "1000000", "<stellar tx hash>", { network: "testnet" }));
 });
 ws.connect();
 ```
@@ -55,10 +55,18 @@ A complete runnable solver is in [`examples/example-solver.ts`](examples/example
 
 ## Signing
 
-`signAccept`, `signFill`, `signCancel` and `signWsAuth` return ready-to-send
-request bodies. The canonical messages (`messages.*`) and the shared vectors
-in [`test-vectors/signatures.json`](test-vectors/signatures.json) are
-verified against the server's implementation in CI.
+`signAccept`, `signFill` and `signCancel` require the Stellar `network` option
+for version 2 messages, and generate a fresh nonce with a five-minute expiry by
+default. `signWsAuth` remains a separate connection-authentication scheme. The
+legacy intent signing helpers remain available when the network option is
+omitted, but the server accepts those signatures only while
+`ALLOW_LEGACY_STELLAR_SIGNATURES=true`. Shared v1/v2 vectors are checked
+against the server implementation in CI.
+
+EVM-originated creation and cancellation use `signEvmCreateIntent` and
+`signEvmCancelIntent` with the chain ID and escrow verifying contract. Auction
+clients can call `rest.getAuctionPrice(id)` and listen for `auction_price`
+events; the accepted amount is locked into the intent and is the minimum fill.
 
 ## Versioning
 

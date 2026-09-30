@@ -136,6 +136,7 @@ class Metrics {
 }
 
 async function api<T>(config: CanaryConfig, method: string, path: string, body?: unknown): Promise<T> {
+  // eslint-disable-next-line no-restricted-syntax -- standalone script, no HttpEgressService in scope
   const res = await fetch(`${config.apiBase}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },

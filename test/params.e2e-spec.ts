@@ -5,7 +5,10 @@
  * against a real booted Nest app (no contract configured → code defaults).
  */
 
-import * as request from "supertest";
+// Default import: with `esModuleInterop` the namespace import is an object
+// wrapper, not the callable `request` function, so `request(server)` throws
+// "request is not a function".
+import request from "supertest";
 import { INestApplication } from "@nestjs/common";
 import { createTestApp } from "./utils/create-test-app";
 

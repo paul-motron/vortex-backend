@@ -224,6 +224,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/intents/{id}/auction": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["IntentsController_getAuctionPrice"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/intents/{id}/accept": {
         parameters: {
             query?: never;
@@ -436,7 +452,7 @@ export interface components {
             tokens: components["schemas"]["StellarTokenDto"][];
         };
         CreateIntentDto: {
-            /** @description Stellar address of the user creating the intent */
+            /** @description Stellar or EVM address of the user creating the intent */
             user: string;
             /**
              * @description Source chain the funds are coming from
@@ -459,15 +475,39 @@ export interface components {
             dstTokenDecimals: number;
             /** @description Minimum acceptable destination amount as an integer string */
             minDstAmount: string;
+            /** @description Optional Dutch-auction allocation terms */
+            auction?: components["schemas"]["DutchAuctionDto"];
             /** @description Unix timestamp deadline; defaults to now + 1800s; must be between now+60s and now+24h */
             deadline?: number;
+            /** @description EIP-712 signature for EVM-originated intent creation */
+            signature?: string;
+            /** @description Unique nonce included in the EIP-712 signature */
+            nonce?: string;
+            /** @description Unix timestamp when the EIP-712 signature expires */
+            expiresAt?: number;
             /** @description Idempotency key for deduplicating duplicate requests */
             idempotencyKey?: string;
+        };
+        DutchAuctionDto: {
+            /** @description Starting destination amount in base units */
+            startDstAmount: string;
+            /** @description Unix timestamp when the price decay starts */
+            decayStart: number;
+            /** @description Unix timestamp when the price reaches minDstAmount */
+            decayEnd: number;
+            /** @description Solver address exclusively eligible until exclusivityEnd */
+            exclusiveSolver?: string;
+            /** @description Unix timestamp when solver exclusivity ends */
+            exclusivityEnd?: number;
         };
         AcceptIntentDto: {
             /** @description Solver address accepting the intent */
             solver: string;
-            /** @description Base64-encoded Ed25519 signature of the message "accept:<intentId>:<solver>" produced by the solver's private key */
+            /** @description Single-use signing nonce */
+            nonce?: string;
+            /** @description Unix timestamp when the signature expires */
+            expiresAt?: number;
+            /** @description Base64-encoded Ed25519 signature of the signed intent action */
             signature: string;
         };
         FillIntentDto: {
@@ -477,13 +517,21 @@ export interface components {
             fillAmount: string;
             /** @description Stellar fill transaction hash */
             txHash?: string;
-            /** @description Base64-encoded Ed25519 signature of the message "fill:<intentId>:<solver>" produced by the solver's private key */
+            /** @description Single-use signing nonce */
+            nonce?: string;
+            /** @description Unix timestamp when the signature expires */
+            expiresAt?: number;
+            /** @description Base64-encoded Ed25519 signature of the signed intent action */
             signature: string;
         };
         CancelIntentDto: {
-            /** @description Stellar address of the intent's original creator (must match) */
+            /** @description Stellar or EVM address of the intent's original creator (must match) */
             user: string;
-            /** @description Base64-encoded Ed25519 signature of the message "cancel:<intentId>" produced by the private key of `user` */
+            /** @description Single-use signing nonce */
+            nonce?: string;
+            /** @description Unix timestamp when the signature expires */
+            expiresAt?: number;
+            /** @description Base64 Ed25519 or EIP-712 signature proving control of user */
             signature: string;
         };
         QuoteRequestDto: {
@@ -1009,6 +1057,29 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    IntentsController_getAuctionPrice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: { id: string };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: { [name: string]: unknown };
+                content: {
+                    "application/json": {
+                        intentId: string;
+                        currentDstAmount: string;
+                        acceptedDstAmount?: string;
+                        timestamp: number;
+                    };
+                };
+            };
+            404: { headers: { [name: string]: unknown }; content?: never };
         };
     };
     IntentsController_accept: {

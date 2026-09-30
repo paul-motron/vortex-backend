@@ -193,6 +193,110 @@ describe("Validation Negative Paths (e2e)", () => {
     });
   });
 
+  describe("Advanced search validation (#440)", () => {
+    it("should return 400 when minAmountUsd exceeds maxAmountUsd", async () => {
+      // An inverted range can never match anything; rejecting it is clearer than
+      // silently returning an empty page the caller has to interpret.
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ minAmountUsd: 500, maxAmountUsd: 100 })
+        .expect(400);
+      // HttpExceptionFilter normalises every error to a single `error` string.
+      expect(res.body.error).toMatch(/minAmountUsd/);
+    });
+
+    it("should accept a minAmountUsd equal to maxAmountUsd", async () => {
+      // Equal bounds are a legitimate single-value query, not an inversion.
+      await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ minAmountUsd: 100, maxAmountUsd: 100 })
+        .expect(200);
+    });
+
+    it("should accept an open-ended USD range", async () => {
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ minAmountUsd: 0 }).expect(200);
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ maxAmountUsd: 1000 }).expect(200);
+    });
+
+    it("should return 400 when createdFrom exceeds createdTo", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ createdFrom: 2_000_000, createdTo: 1_000_000 })
+        .expect(400);
+      expect(res.body.error).toMatch(/createdFrom/);
+    });
+
+    it("should accept a single-instant creation window", async () => {
+      await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ createdFrom: 1_000_000, createdTo: 1_000_000 })
+        .expect(200);
+    });
+
+    it("should return 400 for a negative USD bound", async () => {
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ minAmountUsd: -1 }).expect(400);
+    });
+
+    it("should return 400 for a negative creation timestamp", async () => {
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ createdFrom: -5 }).expect(400);
+    });
+
+    it("should return 400 for a non-numeric USD bound", async () => {
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ minAmountUsd: "abc" }).expect(400);
+    });
+
+    it.each([
+      "usd:sideways",
+      "nonsense",
+      "created:up",
+      "createdAt",
+      "",
+      "created:asc:desc",
+    ])("should return 400 for the invalid sort %p", async (sort) => {
+      // Only created|deadline|usd, optionally with :asc or :desc. An open sort
+      // parameter would be attacker-controlled ordering on an indexed column.
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ sort }).expect(400);
+    });
+
+    it.each(["created", "created:asc", "created:desc", "deadline:asc", "usd", "usd:desc"])(
+      "should accept the valid sort %p",
+      async (sort) => {
+        await request(app.getHttpServer()).get("/api/v1/intents").query({ sort }).expect(200);
+      },
+    );
+
+    it("should return 400 for a negative offset", async () => {
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ offset: -1 }).expect(400);
+    });
+
+    it("should return 400 for a zero limit", async () => {
+      // limit=0 would be a request for an empty page with a non-zero total,
+      // which reads like a bug to every client.
+      await request(app.getHttpServer()).get("/api/v1/intents").query({ limit: 0 }).expect(400);
+    });
+
+    it("should return 400 for a limit above the maximum", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ limit: 101 })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should return the pagination metadata alongside the results", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ limit: 5, offset: 0 })
+        .expect(200);
+      // Clients page off these, so they must always be present and truthful.
+      expect(res.body).toHaveProperty("intents");
+      expect(res.body).toHaveProperty("total");
+      expect(res.body.limit).toBe(5);
+      expect(res.body.offset).toBe(0);
+      expect(Array.isArray(res.body.intents)).toBe(true);
+    });
+  });
+
   describe("Unknown destination/source token rejection (#276)", () => {
     it("should return 400 for a well-formed but unregistered dstTokenContract", async () => {
       const res = await request(app.getHttpServer())

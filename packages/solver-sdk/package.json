@@ -16,6 +16,7 @@
   },
   "vortexApiVersion": "0.1.0",
   "dependencies": {
+    "viem": "^2.44.4",
     "ws": "^8.18.0"
   },
   "peerDependencies": {

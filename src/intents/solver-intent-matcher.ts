@@ -40,16 +40,27 @@ export interface SolverMatchPredicate {
  * it is cheap to evaluate (no object allocations per intent check).
  */
 export function buildMatchPredicate(solver: SolverRecord): SolverMatchPredicate {
-  const chainSet = new Set<string>(solver.supportedChains);
-  const tokenSet = new Set<string>(
-    solver.supportedTokens.map((t) => t.toLowerCase()),
-  );
-  const hasBond = BigInt(solver.bondAmount) > 0n;
+  // A missing capability list means the solver declared nothing, so it matches
+  // nothing.  Defaulting to an empty set (rather than trusting the field to be
+  // present) keeps a partially-populated solver record from widening its own
+  // feed and keeps this hot path from throwing mid-broadcast.
+  const supportedChains = Array.isArray(solver.supportedChains) ? solver.supportedChains : [];
+  const supportedTokens = Array.isArray(solver.supportedTokens) ? solver.supportedTokens : [];
+  const chainSet = new Set<string>(supportedChains);
+  const tokenSet = new Set<string>(supportedTokens.map((t) => t.toLowerCase()));
+  // A missing / unparseable bond is treated as "no bond", so the solver matches
+  // nothing rather than throwing (or matching) on malformed data.
+  let hasBond = false;
+  try {
+    hasBond = BigInt(solver.bondAmount) > 0n;
+  } catch {
+    hasBond = false;
+  }
 
   return {
     solverAddress: solver.address,
-    supportedChains: [...solver.supportedChains],
-    supportedTokens: [...solver.supportedTokens],
+    supportedChains: [...supportedChains],
+    supportedTokens: [...supportedTokens],
     bondAmount: solver.bondAmount,
     matches(intent: Intent): boolean {
       if (!hasBond) return false;

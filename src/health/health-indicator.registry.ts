@@ -21,7 +21,7 @@ export interface HealthIndicator {
   check(): Promise<IndicatorResult>;
 }
 
-interface CachedResult extends IndicatorResult {
+export interface CachedResult extends IndicatorResult {
   critical: boolean;
   checkedAt: string;
   durationMs: number;

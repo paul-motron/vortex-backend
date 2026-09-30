@@ -22,7 +22,11 @@ describe("StatsController (e2e)", () => {
     await app.close();
   });
 
-  it("GET /api/v1/stats reflects the seeded data", async () => {
+  // The seed data only exists in the in-memory store; with INTENTS_STORE=
+  // postgres the table is shared across suites and holds whatever ran first.
+  const seeded = (process.env.INTENTS_STORE ?? "memory") === "memory" ? it : it.skip;
+
+  seeded("GET /api/v1/stats reflects the seeded data", async () => {
     const res = await request(app.getHttpServer()).get("/api/v1/stats").expect(200);
 
     expect(res.body.totalIntents).toBe(5);

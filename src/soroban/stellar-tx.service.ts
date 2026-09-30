@@ -30,15 +30,12 @@ import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Account,
-  Address,
   BASE_FEE,
   Contract,
   FeeBumpTransaction,
   Operation,
   SorobanDataBuilder,
-  nativeToScVal,
   Networks,
-  Operation,
   SorobanRpc,
   Transaction,
   TransactionBuilder,
@@ -88,6 +85,24 @@ export interface InvokeContractParams {
   contractId: string;
   method: string;
   args: xdr.ScVal[];
+}
+
+/**
+ * Time bound (seconds) on every transaction built by {@link StellarTxService.invokeContract}.
+ * After this the network rejects the envelope, which is what lets the outbox
+ * relay treat a NOT_FOUND envelope hash as "never landed, safe to rebuild"
+ * once its processing lease (OUTBOX_LEASE_SECONDS) has expired (issue #396).
+ */
+export const INVOKE_TX_TIMEOUT_SECONDS = 30;
+
+export interface InvokeContractOptions {
+  /**
+   * Called with the signed envelope's hash after signing and *before*
+   * broadcast (issue #396). If it throws, nothing is submitted. The outbox
+   * relay uses this to durably record the hash so a crash mid-submit can be
+   * detected on retry instead of double-submitting.
+   */
+  beforeSubmit?: (envelopeHash: string) => Promise<void>;
 }
 
 export interface InvokeContractResult {
@@ -161,8 +176,8 @@ export class StellarTxService {
     private readonly signerService: SignerService,
     private readonly confirmationService: TxConfirmationService,
     configService: ConfigService<AppConfig, true>,
-    @Optional() private readonly metricsService?: MetricsService,
     private readonly killSwitch: KillSwitchService,
+    @Optional() private readonly metricsService?: MetricsService,
     @Optional() private readonly flags?: FeatureFlagService,
   ) {
     this.feePercentile = configService.get("stellar.feePercentile", { infer: true });
@@ -266,7 +281,10 @@ export class StellarTxService {
    *   3. Sign and submit the (now-prepared) original transaction.
    *   4. Confirm and return the result.
    */
-  async invokeContract(params: InvokeContractParams): Promise<InvokeContractResult> {
+  async invokeContract(
+    params: InvokeContractParams,
+    options: InvokeContractOptions = {},
+  ): Promise<InvokeContractResult> {
     // Issue #477 — the last gate before anything touches the chain. Checking
     // here rather than only in controllers also covers background callers (the
     // sweeper, event ingestion) that never pass through an HTTP guard.
@@ -303,7 +321,7 @@ export class StellarTxService {
         .addOperation(
           new Contract(params.contractId).call(params.method, ...params.args),
         )
-        .setTimeout(30)
+        .setTimeout(INVOKE_TX_TIMEOUT_SECONDS)
         .build();
       let simulation = await this.sorobanService.simulateTransaction(rawTx);
 
@@ -333,6 +351,8 @@ export class StellarTxService {
       // Assemble with Soroban data + fee.
       const prepared = await this.sorobanService.prepareTransaction(rawTx);
       const signed = await this.signerService.sign(prepared as Transaction);
+
+      await options.beforeSubmit?.(signed.hash().toString("hex"));
 
       const submittedAt = Date.now();
       const sendResponse = await this.sorobanService.submitTransaction(signed);
@@ -602,26 +622,45 @@ export class StellarTxService {
   ): Promise<Transaction> {
     const baseFee = await this.estimateBaseFee();
     const sequence = await this.resolveSimulationSequence(sourceAccount);
-    const contract = Address.fromString(params.contractId);
 
-    return new TransactionBuilder(new Account(sourceAccount, sequence), {
+    // `TransactionBuilder` emits `source.sequenceNumber() + 1` as the envelope's
+    // seqNum, so the account handed to it must sit one *below* the sequence the
+    // envelope should carry; passing `sequence` straight through would shift
+    // every envelope (42 -> 43, 501 -> 502, 0 -> 1).
+    const sourceSequence = (BigInt(sequence) - 1n).toString();
+
+    // Pin both ends of the window: `simulationTimeoutSeconds` sizes the
+    // *width* (worst-case queue drain), not "seconds from now", so the
+    // envelope does not silently stay valid for `now + window` seconds.
+    const now = Math.floor(Date.now() / 1000);
+
+    return new TransactionBuilder(new Account(sourceAccount, sourceSequence), {
       fee: baseFee,
       networkPassphrase: this.networkPassphrase,
     })
+      // Same envelope shape as `invokeContract` builds for the live path —
+      // the monitor is only useful if it simulates the call the chain would
+      // actually receive.
+      .addOperation(new Contract(params.contractId).call(params.method, ...params.args))
+      .setTimebounds(now, now + this.simulationTimeoutSeconds)
       .addOperation(
+        // The SDK expects `func` to be a fully-formed xdr.HostFunction that
+        // already carries its InvokeContractArgs; a bare enum value (and the
+        // SDK-11 style `args` array) produces an envelope that cannot be XDR
+        // encoded. The token argument mirrors the settlement contract's
+        // `native` (XLM) entry point — irrelevant to a simulation, but the
+        // ScVal must be well-formed for the envelope to decode.
         Operation.invokeHostFunction({
-          func: xdr.HostFunctionType.hostFunctionTypeInvokeContract,
-          args: [
-            contract.toScAddress(),
-            // The method name is a symbol in the Soroban ABI, not a string.
-            nativeToScVal(params.method, { type: "symbol" }),
-            params.args,
-            // Token the call is denominated in. `native` is XLM; the settlement
-            // contract's own token is a distinct `ScAddress` entry point. The
-            // value is irrelevant to a simulation, but it must be a well-formed
-            // ScVal for the envelope to decode.
-            nativeToScVal("native", { type: "symbol" }),
-          ],
+          func: xdr.HostFunction.hostFunctionTypeInvokeContract(
+            new xdr.InvokeContractArgs({
+              contractAddress: contract.toScAddress(),
+              // InvokeContractArgs takes the method name as a plain string and
+              // encodes it as a symbol itself, so no nativeToScVal here.
+              functionName: params.method,
+              args: params.args,
+            }),
+          ),
+          auth: [],
         }),
       )
       .setTimeout(this.simulationTimeoutSeconds)

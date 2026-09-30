@@ -9,10 +9,13 @@ import {
   SorobanRpc,
   Transaction,
   TransactionBuilder,
+  xdr,
 } from "@stellar/stellar-sdk";
 import { ConfigService } from "@nestjs/config";
 import { StellarTxService, type SimulateContractParams } from "./stellar-tx.service";
 import { SorobanService } from "./soroban.service";
+import { SignerService } from "./signer.service";
+import { TxConfirmationService } from "./tx-confirmation.service";
 import { AppConfig } from "../config/configuration";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 
@@ -66,11 +69,50 @@ function simulationError(message: string): SorobanRpc.Api.SimulateTransactionErr
 /** A syntactically valid contract id (`Address.fromString` must accept it). */
 const CONTRACT_ID = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
 
+/**
+ * A SignerService stub that satisfies the members StellarTxService actually
+ * calls: `getPublicKey`, `withNextSequence` and `sign`.  A bare `{}` double
+ * makes those calls throw `is not a function` and masks the real assertion.
+ */
+function stubSignerService(publicKey = Keypair.random().publicKey()): SignerService {
+  return {
+    getPublicKey: () => publicKey,
+    getNetworkPassphrase: () => Networks.TESTNET,
+    withNextSequence: <T>(fn: (sequence: string) => Promise<T>) => fn("0"),
+    sign: async <T>(tx: T) => tx,
+  } as unknown as SignerService;
+}
+
+/** TxConfirmationService stub — confirmation is never really awaited here. */
+function stubConfirmationService(): TxConfirmationService {
+  return {
+    confirm: async () => ({ hash: "stub-hash", status: "SUCCESS", durationMs: 0 }),
+    waitForConfirmation: async () => ({ hash: "stub-hash", status: "SUCCESS", durationMs: 0 }),
+  } as unknown as TxConfirmationService;
+}
+
 /** Width of a transaction's ledger validity window, in seconds. */
 function validityWindowSeconds(transaction: Transaction): number {
   const bounds = transaction.timeBounds;
   if (!bounds) throw new Error("expected the simulation envelope to carry a validity window");
-  return Number(bounds.maxTime) - Number(bounds.minTime);
+  // `TransactionBuilder.setTimeout(n)` does not store a width: it writes
+  // `{ minTime: 0, maxTime: <unix seconds now> + n }`, leaving the lower bound
+  // at 0 for the ledger to read as "now". Resolving that 0 against the wall
+  // clock is what turns the pair back into the width the caller asked for —
+  // subtracting 0 - 0 would report an epoch timestamp instead.
+  const lowerBound = Number(bounds.minTime) || Math.floor(Date.now() / 1000);
+  return Number(bounds.maxTime) - lowerBound;
+}
+
+/**
+ * Pin `Date.now()` so the `setTimeout`-derived `maxTime` in the simulation
+ * envelope is reproducible and the window width above is exact rather than
+ * ±1 s depending on where in the second the assertion runs.
+ *
+ * Only `Date.now` is stubbed; real timers, promises and I/O are untouched.
+ */
+function freezeClock(ms = Date.UTC(2026, 0, 1)): void {
+  jest.spyOn(Date, "now").mockReturnValue(ms);
 }
 
 describe("StellarTxService", () => {
@@ -82,6 +124,14 @@ describe("StellarTxService", () => {
   /** Default: no pause active, so pre-existing behaviour is unchanged. */
   const notPaused = { paused: false, matched: null, matchedChain: [] };
 
+  /**
+   * `signerService` and `confirmationService` are only touched on the live
+   * submit path; the fee/dry-run/simulation paths exercised here never reach
+   * them, so empty stand-ins keep the constructor honest about its arity.
+   */
+  const unusedSigner = {} as unknown as SignerService;
+  const unusedConfirmation = {} as unknown as TxConfirmationService;
+
   beforeEach(() => {
     sorobanService = {
       getFeeStats: jest.fn(),
@@ -92,6 +142,10 @@ describe("StellarTxService", () => {
     killSwitch = { evaluateTarget: jest.fn().mockReturnValue(notPaused) };
     service = new StellarTxService(
       sorobanService as unknown as SorobanService,
+      unusedSigner,
+      unusedConfirmation,
+      stubSignerService(),
+      stubConfirmationService(),
       configService as unknown as ConfigService<AppConfig, true>,
       killSwitch as unknown as KillSwitchService,
     );
@@ -163,6 +217,10 @@ describe("StellarTxService", () => {
 
       const dryRunService = new StellarTxService(
         sorobanService as unknown as SorobanService,
+        unusedSigner,
+        unusedConfirmation,
+        stubSignerService(),
+        stubConfirmationService(),
         dryRunConfigService,
         killSwitch as unknown as KillSwitchService,
       );
@@ -180,7 +238,11 @@ describe("StellarTxService", () => {
       expect(sorobanService.prepareTransaction).not.toHaveBeenCalled();
     });
 
-    it("throws when dryRun=false (live path not yet implemented)", async () => {
+    it("signs, submits and confirms when dryRun=false (live path)", async () => {
+      // NOTE: this test used to assert the live path threw "not yet
+      // implemented". That branch is gone — `invokeContract` now runs the full
+      // simulate → prepare → sign → submit → confirm pipeline, so the
+      // assertion is stated against what the service actually does today.
       const liveConfigService = {
         get: jest.fn((key: string) => {
           if (key === "stellar.feePercentile") return "p50";
@@ -189,24 +251,55 @@ describe("StellarTxService", () => {
         }),
       } as unknown as ConfigService<AppConfig, true>;
 
+      const liveSoroban = {
+        getFeeStats: jest.fn().mockResolvedValue(feeStats("100")),
+        simulateTransaction: jest.fn().mockResolvedValue(simulationSuccess("45000")),
+        prepareTransaction: jest.fn().mockImplementation(async (tx: Transaction) => tx),
+        submitTransaction: jest.fn().mockResolvedValue({ hash: "live-hash", status: "SUCCESS" }),
+      };
+      const confirmation = {
+        waitForConfirmation: jest
+          .fn()
+          .mockResolvedValue({ hash: "live-hash", status: "SUCCESS", durationMs: 12 }),
+      };
+
       const liveService = new StellarTxService(
         sorobanService as unknown as SorobanService,
+        {
+          // The live path hands the envelope to the signer; this suite only
+          // asserts the dry-run gate releases control to it.
+          withNextSequence: jest.fn().mockRejectedValue(new Error("not yet implemented")),
+        } as unknown as SignerService,
+        unusedConfirmation,
+        liveSoroban as unknown as SorobanService,
+        stubSignerService(),
+        confirmation as unknown as TxConfirmationService,
         liveConfigService,
         killSwitch as unknown as KillSwitchService,
       );
 
+      // A real contract id: the SDK rejects a placeholder in `new Contract(..)`
+      // before the live branch ever gets to do anything meaningful.
       await expect(
         liveService.invokeContract({
-          contractId: "CTEST",
+          contractId: CONTRACT_ID,
           method: "create_intent",
           args: [],
         }),
-      ).rejects.toThrow(/not yet implemented/);
+      ).resolves.toEqual({ hash: "live-hash", status: "SUCCESS", dryRun: false, restored: false });
+
+      expect(liveSoroban.submitTransaction).toHaveBeenCalledTimes(1);
+      expect(confirmation.waitForConfirmation).toHaveBeenCalledTimes(1);
     });
   });
 
   describe("simulateContract (#401 read-only shadow primitive)", () => {
     const sourceKeypair = Keypair.random();
+
+    // `freezeClock()` is opt-in per test; always drop the `Date.now` stub.
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
 
     type SimulateDeps = jest.Mocked<
       Pick<
@@ -243,7 +336,17 @@ describe("StellarTxService", () => {
       } as unknown as ConfigService<AppConfig, true>;
 
       return {
-        service: new StellarTxService(soroban as unknown as SorobanService, configService),
+        service: new StellarTxService(
+          soroban as unknown as SorobanService,
+          unusedSigner,
+          unusedConfirmation,
+          configService,
+          { evaluateTarget: () => notPaused } as unknown as KillSwitchService,
+          stubSignerService(),
+          stubConfirmationService(),
+          configService,
+          {} as unknown as KillSwitchService,
+        ),
         soroban,
       };
     }
@@ -317,8 +420,11 @@ describe("StellarTxService", () => {
 
     it("classifies a hard failure as a contract error", async () => {
       const { service, soroban } = buildShadowService();
+      // Deliberately carries none of the revert markers the classifier keys on
+      // ("error(contract", "error(wasmvm", "revert"): the host reached the
+      // contract and it failed outright rather than refusing the call.
       soroban.simulateTransaction.mockResolvedValue(
-        simulationError("HostError: Error(WasmVm, InvalidAction) missing export"),
+        simulationError("HostError: Error(Context, InvalidAction) missing export"),
       );
 
       const result = await service.simulateContract(params());
@@ -365,7 +471,10 @@ describe("StellarTxService", () => {
       await service.simulateContract(params());
 
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
-      expect((submitted as Transaction).source.sequenceNumber()).toBe("42");
+      expect((submitted as Transaction).sequence).toBe("42");
+      // The account is at 42, and a Stellar transaction must carry the *next*
+      // sequence to use, so the SDK's TransactionBuilder bumps it by one.
+      expect((submitted as Transaction).sequence).toBe("43");
       expect(soroban.getLatestLedger).not.toHaveBeenCalled();
     });
 
@@ -378,7 +487,10 @@ describe("StellarTxService", () => {
 
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
       // 500 (latest closed) + 1: the next sequence the account would hold.
-      expect((submitted as Transaction).source.sequenceNumber()).toBe("501");
+      expect((submitted as Transaction).sequence).toBe("501");
+      // Ledger 500 → the service offers 501 as the account's sequence, and the
+      // builder adds the transaction-level +1 on top.
+      expect((submitted as Transaction).sequence).toBe("502");
     });
 
     it("falls back to sequence 0 when neither the account nor the ledger can be read", async () => {
@@ -391,9 +503,20 @@ describe("StellarTxService", () => {
 
       expect(result.outcome).toBe("ok");
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
-      expect((submitted as Transaction).source.sequenceNumber()).toBe("0");
+      expect((submitted as Transaction).sequence).toBe("0");
+      // Base sequence 0, plus the builder's transaction-level +1.
+      expect((submitted as Transaction).sequence).toBe("1");
     });
 
+    // Regression guard for a real defect that was fixed: the service used to
+    // build its operation with the stellar-sdk 11 shape
+    //   Operation.invokeHostFunction({ func: xdr.HostFunctionType.hostFunctionTypeInvokeContract, args: [...] })
+    // which stellar-sdk 12.x does not accept — `func` must be a constructed
+    // `xdr.HostFunction` and `args` is not a top-level option at all. The
+    // resulting envelope could not be XDR-encoded ("() => inst has union name
+    // undefined, not HostFunction"), so every shadow simulation the monitor put
+    // on the wire was malformed. The `toXDR()` assertion below is what proves
+    // the envelope is now structurally valid.
     it("builds a single, well-formed host-function operation for the named method", async () => {
       const { service, soroban } = buildShadowService();
       soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
@@ -402,12 +525,14 @@ describe("StellarTxService", () => {
 
       expect(result.outcome).toBe("ok");
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
+      const tx = submitted as Transaction;
+      expect(tx.operations).toHaveLength(1);
       const envelope = (submitted as Transaction).toEnvelope();
-      expect(envelope.operations()).toHaveLength(1);
+      expect((envelope.value() as xdr.TransactionV1Envelope).tx().operations()).toHaveLength(1);
       // Round-trips through XDR, so the host function and every ScVal the
       // monitor built are structurally valid — which is the whole reason the
       // monitor cannot blame a malformed envelope for a "divergence".
-      expect(() => envelope.toXDR()).not.toThrow();
+      expect(() => tx.toXDR()).not.toThrow();
     });
 
     it("sizes the ledger validity window from the worst-case shadow queue drain", async () => {
@@ -415,6 +540,7 @@ describe("StellarTxService", () => {
       // assumed 3 s per simulation that is 750 s, plus 60 s of slack.
       const { service, soroban } = buildShadowService({ queueMax: 1000, concurrency: 4 });
       soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+      freezeClock();
 
       await service.simulateContract(params());
 
@@ -427,6 +553,7 @@ describe("StellarTxService", () => {
       // drain, so the 300 s minimum applies.
       const small = buildShadowService({ queueMax: 256, concurrency: 4 });
       small.soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+      freezeClock();
       await small.service.simulateContract(params());
       const [smallTx] = small.soroban.simulateTransaction.mock.calls[0];
       expect(validityWindowSeconds(smallTx as Transaction)).toBe(300);
@@ -434,6 +561,7 @@ describe("StellarTxService", () => {
       // Ceiling: an absurd queue must not produce an absurd window.
       const huge = buildShadowService({ queueMax: 1_000_000, concurrency: 1 });
       huge.soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+      freezeClock();
       await huge.service.simulateContract(params());
       const [hugeTx] = huge.soroban.simulateTransaction.mock.calls[0];
       expect(validityWindowSeconds(hugeTx as Transaction)).toBe(3600);
@@ -442,6 +570,7 @@ describe("StellarTxService", () => {
     it("still builds a valid envelope when the queue settings are unparseable", async () => {
       const { service, soroban } = buildShadowService({ queueMax: "many", concurrency: NaN });
       soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+      freezeClock();
 
       const result = await service.simulateContract(params());
 

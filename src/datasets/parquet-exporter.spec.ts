@@ -5,9 +5,16 @@ import { DatasetRow } from "./datasets.types";
 
 async function readBack(buffer: Buffer): Promise<Record<string, unknown>[]> {
   const fs = await import("fs/promises");
-  const path = `/tmp/parquet-roundtrip-${Date.now()}-${Math.random()}.parquet`;
-  await fs.writeFile(path, buffer);
-  const reader = await ParquetReader.openFile(path);
+  const os = await import("os");
+  const nodePath = await import("path");
+  // Use the OS temp dir rather than a hard-coded /tmp, which does not exist on
+  // Windows and made this round-trip test fail outside Linux CI.
+  const file = nodePath.join(
+    os.tmpdir(),
+    `parquet-roundtrip-${Date.now()}-${Math.random()}.parquet`,
+  );
+  await fs.writeFile(file, buffer);
+  const reader = await ParquetReader.openFile(file);
   const cursor = reader.getCursor();
   const rows: Record<string, unknown>[] = [];
   let row: Record<string, unknown> | null;
@@ -15,7 +22,7 @@ async function readBack(buffer: Buffer): Promise<Record<string, unknown>[]> {
     rows.push(row);
   }
   await reader.close();
-  await fs.unlink(path);
+  await fs.unlink(file);
   return rows;
 }
 

@@ -19,8 +19,9 @@
 8. [Scenario E — Synthetic canary failing](#scenario-e--synthetic-canary-failing)
 9. [Health probes](#health-probes)
 10. [Scenario F — WebSocket backplane and slow consumers](#scenario-f--websocket-backplane-and-slow-consumers)
-11. [Key configuration](#key-configuration)
-12. [Escalation path](#escalation-path)
+11. [Scenario G — Outbox rows dead or backlogged](#scenario-g--outbox-rows-dead-or-backlogged)
+12. [Key configuration](#key-configuration)
+13. [Escalation path](#escalation-path)
 
 ---
 
@@ -426,6 +427,105 @@ Alerts `VortexCanaryConsecutiveFailures`, `VortexCanaryFundsLow`,
 
 Canary intents are excluded from public stats and leaderboards via
 `CANARY_ADDRESSES`; if they show up there, that variable is missing on the API.
+## Scenario F — WebSocket backplane and slow consumers
+
+**Backplane (issue #454).** With `WS_BACKPLANE=redis` every replica publishes
+events into a Redis stream (`vortex:ws:events`) with a global sequence number
+(`vortex:ws:seq`) and delivers from that stream, so clients on any replica
+see the same events, in the same order, with the same `seq`, and replay works
+against any replica. Publishing is queued in the background — request
+handlers never wait for Redis.
+
+- **Redis down:** `/health/ready` on WS-role pods goes 503 (`ws_backplane`
+  down) and `vortex_ws_backplane_connected` drops to 0. Publishes queue
+  (bounded) and are retried in order; on recovery each replica resumes the
+  stream from the last event it delivered — no loss, duplicates or
+  reordering. Watch `vortex_ws_backplane_dropped_total{reason="queue_full"}`
+  for events dropped during a long outage.
+- **Latency:** `vortex_ws_backplane_publish_duration_seconds`.
+
+**Connection limits and slow consumers (issue #455).**
+
+- Connections over `WS_MAX_CONNECTIONS` or `WS_MAX_CONNECTIONS_PER_IP` are
+  closed with 1013 (`vortex_ws_connections_rejected_total{reason}`). Behind a
+  load balancer set `WS_TRUST_PROXY_HOPS` to the number of proxies, or every
+  client shares the proxy's IP.
+- Clients over the inbound token bucket get `rate_limited` frames and are
+  closed with 1008 after `WS_RATE_LIMIT_MAX_VIOLATIONS`
+  (`vortex_ws_rate_limited_total{action}`). Frames over
+  `WS_MAX_PAYLOAD_BYTES` close the socket with 1009.
+- Slow consumers: once a socket's buffer passes `WS_OUTBOUND_BUFFER_BYTES`,
+  messages queue (at most `WS_OUTBOUND_QUEUE_MAX`); beyond that the oldest are
+  dropped (`vortex_ws_outbound_dropped_total`) or, with
+  `WS_SLOW_CONSUMER_POLICY=disconnect`, the client is closed
+  (`vortex_ws_slow_consumer_disconnects_total`). Clients recover dropped
+  events with `replay` — the solver SDK does this automatically.
+- Solvers can authenticate with a SEP-10 JWT (`?token=`, `Authorization:
+  Bearer`, or `{ "type": "auth", "token" }`) when `AUTH_JWT_SECRET` is set,
+  in addition to signed `auth` frames. Anonymous connections still receive
+  the public feed.
+
+---
+
+## Scenario G — Outbox rows dead or backlogged
+
+On-chain writes (intent create/accept/fill/cancel) are committed to the
+`onchain_outbox` table in the same transaction as the intent change, and
+`OutboxRelayService` submits them afterwards (issue #396). Alert rules live in
+[`alerts/onchain-writes.rules.yml`](alerts/onchain-writes.rules.yml).
+
+### Symptoms
+
+- `VortexOutboxRowDead`: `vortex_outbox_dead_total` increased. Logs contain
+  `[outbox] ALERT row <id> (...) moved to dead after N attempts: <error>`.
+- `VortexOutboxBacklog`: `vortex_outbox_rows{status="pending"}` keeps growing.
+
+### Impact
+
+A dead row **blocks every later row for the same intent** (per-intent
+ordering), so that intent's on-chain state stops advancing. Other intents
+are unaffected. The API keeps serving from the database.
+
+### Diagnosis
+
+```sql
+SELECT id, intent_id, operation, attempts, last_error, updated_at
+FROM onchain_outbox WHERE status = 'dead' ORDER BY id;
+
+SELECT status, count(*) FROM onchain_outbox GROUP BY status;
+```
+
+| `last_error` | Likely cause |
+|---|---|
+| `SETTLEMENT_CONTRACT_ID is not configured` | Env misconfiguration |
+| `signer is not configured` | `SOROBAN_SIGNING_KEY` missing |
+| `sendTransaction returned ERROR` / `simulation error` | Contract rejected the call — inspect the payload |
+| `RPC ...` / timeouts | Scenario A (RPC downtime) |
+
+Backlog with no dead rows usually means the relay is off
+(`OUTBOX_RELAY_ENABLED=false` — look for `[outbox] relay disabled` at boot)
+or Scenario A.
+
+### Remediation
+
+Fix the root cause first, then requeue (resets attempts; the intent unblocks):
+
+```bash
+curl -s -X POST -H "x-admin-key: $ADMIN_KEY" \
+  "$API/api/v1/admin/outbox/<id>/requeue"
+```
+
+Never delete outbox rows or edit `status` by hand while the relay is running;
+the relay's writes are fenced on `attempts` and a manual edit can be
+overwritten. A row whose operation must be abandoned (e.g. the contract will
+never accept it) needs a code/ADR decision — escalate.
+
+### Crash safety (why duplicates don't happen)
+
+The relay stores the signed envelope hash before broadcasting. After a crash
+the row is reclaimed once `OUTBOX_LEASE_SECONDS` (default 120 s, longer than
+the 30 s transaction time bound) has passed; the relay looks that hash up and
+confirms the row if it landed, instead of resubmitting.
 
 ---
 
@@ -475,46 +575,6 @@ readinessProbe:
 
 ---
 
-## Scenario F — WebSocket backplane and slow consumers
-
-**Backplane (issue #454).** With `WS_BACKPLANE=redis` every replica publishes
-events into a Redis stream (`vortex:ws:events`) with a global sequence number
-(`vortex:ws:seq`) and delivers from that stream, so clients on any replica
-see the same events, in the same order, with the same `seq`, and replay works
-against any replica. Publishing is queued in the background — request
-handlers never wait for Redis.
-
-- **Redis down:** `/health/ready` on WS-role pods goes 503 (`ws_backplane`
-  down) and `vortex_ws_backplane_connected` drops to 0. Publishes queue
-  (bounded) and are retried in order; on recovery each replica resumes the
-  stream from the last event it delivered — no loss, duplicates or
-  reordering. Watch `vortex_ws_backplane_dropped_total{reason="queue_full"}`
-  for events dropped during a long outage.
-- **Latency:** `vortex_ws_backplane_publish_duration_seconds`.
-
-**Connection limits and slow consumers (issue #455).**
-
-- Connections over `WS_MAX_CONNECTIONS` or `WS_MAX_CONNECTIONS_PER_IP` are
-  closed with 1013 (`vortex_ws_connections_rejected_total{reason}`). Behind a
-  load balancer set `WS_TRUST_PROXY_HOPS` to the number of proxies, or every
-  client shares the proxy's IP.
-- Clients over the inbound token bucket get `rate_limited` frames and are
-  closed with 1008 after `WS_RATE_LIMIT_MAX_VIOLATIONS`
-  (`vortex_ws_rate_limited_total{action}`). Frames over
-  `WS_MAX_PAYLOAD_BYTES` close the socket with 1009.
-- Slow consumers: once a socket's buffer passes `WS_OUTBOUND_BUFFER_BYTES`,
-  messages queue (at most `WS_OUTBOUND_QUEUE_MAX`); beyond that the oldest are
-  dropped (`vortex_ws_outbound_dropped_total`) or, with
-  `WS_SLOW_CONSUMER_POLICY=disconnect`, the client is closed
-  (`vortex_ws_slow_consumer_disconnects_total`). Clients recover dropped
-  events with `replay` — the solver SDK does this automatically.
-- Solvers can authenticate with a SEP-10 JWT (`?token=`, `Authorization:
-  Bearer`, or `{ "type": "auth", "token" }`) when `AUTH_JWT_SECRET` is set,
-  in addition to signed `auth` frames. Anonymous connections still receive
-  the public feed.
-
----
-
 ## Key configuration
 
 | Variable | Default | Effect |
@@ -532,6 +592,10 @@ handlers never wait for Redis.
 | `ADMIN_API_KEYS` | empty (admin APIs disabled) | `id:role:secret` entries for admin / superadmin endpoints |
 | `PROCESS_ROLE` / `JOBS_DRIVER` | `all` / `memory` | Where job workers run; `bullmq` for multi-instance |
 | `CANARY_ADDRESSES` | empty | Canary accounts excluded from public stats |
+| `OUTBOX_RELAY_ENABLED` | `true` | Kill switch for the outbox relay; rows accumulate while off |
+| `OUTBOX_MAX_ATTEMPTS` | `8` | Claims before an outbox row is dead-lettered |
+| `OUTBOX_LEASE_SECONDS` | `120` | Crash-reclaim delay; must exceed the 30 s tx time bound |
+| `SLASH_CHALLENGE_WINDOW_SECONDS` | `600` | Delay before a detected slash may be broadcast — see [slash-cancellation.md](slash-cancellation.md) |
 
 ---
 
@@ -543,3 +607,53 @@ handlers never wait for Redis.
 
 > For production incidents open a severity-1 ticket and page the service owner
 > via the alerting system.
+
+---
+
+## Inspecting Stuck Transactions (#386)
+
+Transactions in `pending_transactions` with `status = 'pending'` and `next_poll_at` in the past are being actively retried by `TxConfirmationService`. Normal retries use exponential backoff up to `max_track_until`.
+
+### Find all stuck transactions
+
+```sql
+SELECT tx_hash, intent_id, attempts, fee_bump_count,
+       to_timestamp(next_poll_at) AS next_poll_at_ts,
+       to_timestamp(max_track_until) AS expires_at,
+       created_at
+FROM   pending_transactions
+WHERE  status = 'pending'
+  AND  next_poll_at < extract(epoch FROM now())
+ORDER  BY next_poll_at ASC
+LIMIT  50;
+```
+
+### Force-expire a stuck transaction
+
+```sql
+UPDATE pending_transactions
+SET    status = 'expired', updated_at = now()
+WHERE  tx_hash = '<hash>';
+```
+
+### Inspect dead-lettered events (#389)
+
+```sql
+SELECT ledger, event_index, contract_id, network, last_error, attempts, created_at
+FROM   dead_letter_events
+ORDER  BY created_at DESC
+LIMIT  20;
+```
+
+### Key Prometheus metrics
+
+| Metric | Alert threshold |
+|--------|----------------|
+| `vortex_tx_confirmation_outcomes_total{status="confirmed\|failed\|expired"}` | — (informational) |
+| `vortex_tx_confirmation_latency_seconds` | p99 > 120 s |
+| `vortex_tx_fee_bump_total{percentile}` | — (informational) |
+| `vortex_tx_fee_bump_ceiling_hits_total` | > 0 (alert) |
+| `vortex_channel_pool_utilisation` | > 0.9 sustained |
+| `vortex_channel_bad_seq_resyncs_total` | spike > 10/min |
+| `vortex_ingestion_cursor_lag_ledgers` | > 200 ledgers |
+| `vortex_ingestion_dead_letter_total` | > 0 (alert) |
